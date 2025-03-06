@@ -1,11 +1,12 @@
 import cv2
 import pytesseract
 from pytesseract import Output
+from classes import Pokemon, Team
 import json
 import numpy as np
 import time
 import subprocess
-from classes import Pokemon, Team 
+import multiprocessing
 
 start_time =0
 
@@ -87,19 +88,95 @@ def preprocess_roi(roi):
                                  cv2.THRESH_BINARY, 11, 2)
     return gray
 
+import subprocess
+import datetime
+
+def get_video_metadata(video_path):
+    """Returns width, height, total frames, duration, and recording time using FFmpeg."""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,nb_frames,duration",
+        "-show_entries", "format_tags=creation_time",
+        "-of", "csv=p=0",
+        video_path
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        metadata = result.stdout.strip().split("\n")
+        
+        # Debugging: Print metadata to check what is actually returned
+        print(f"🔍 Debug: Metadata returned by ffprobe → {metadata}")
+
+        # Ensure metadata list has at least 2 elements
+        width, height = map(int, metadata[0].split(",")[:2]) if len(metadata) > 0 else ("Unknown", "Unknown")
+        total_frames = int(metadata[1]) if len(metadata) > 1 and metadata[1].isdigit() else "Unknown"
+        duration = float(metadata[2]) if len(metadata) > 2 and metadata[2].replace(".", "", 1).isdigit() else "Unknown"
+        recorded_time = metadata[3] if len(metadata) > 3 else "Unknown"
+
+        # Convert recorded_time to datetime format if valid
+        if recorded_time != "Unknown":
+            try:
+                recorded_time = datetime.datetime.fromisoformat(recorded_time.replace("Z", "+00:00"))
+            except ValueError:
+                pass  # Keep it as a string if formatting fails
+
+        return width, height, total_frames, duration, recorded_time
+
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error running ffprobe: {e}")
+        return "Unknown", "Unknown", "Unknown", "Unknown", "Unknown"
+
+def crop_video_to_memory(input_video, roi, video_width, video_height, frame_interval=30):
+    """Uses FFmpeg to crop a video, convert to grayscale, and store every 30th frame in memory."""
+    x = int(roi[0] * video_width)
+    y = int(roi[1] * video_height)
+    w = int(roi[2] * video_width)
+    h = int(roi[3] * video_height)
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-i", input_video,             # Input file
+        "-vf", f"crop={w}:{h}:{x}:{y}", # Crop filter
+        "-f", "rawvideo",               # Output as raw frames
+        "-pix_fmt", "gray",             # Convert to grayscale to save space
+        "-"                             # Output to stdout (pipe)
+    ]
+
+    # Run FFmpeg and capture raw frame data
+    process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
+
+    frame_size = w * h  # 1 byte per pixel (Grayscale)
+    frames = []
+    frame_count = 0
+
+
+    while True:
+        raw_frame = process.stdout.read(frame_size)  # Read frame from stdout
+        if not raw_frame:
+            break  # Stop when no more frames are available
+
+        frame_count += 1
+        if frame_count % frame_interval != 0:
+            continue  # Skip frames that are not every 30th frame
+
+        frame = np.frombuffer(raw_frame, np.uint8).reshape((h, w))  # Convert raw data to NumPy array
+        frames.append(frame)  # Store frame in memory
+
+    process.stdout.close()
+    process.wait()
+
+    print(f"✅ Stored {len(frames)} cropped grayscale frames in memory.")
+    return frames  # Returns frames as NumPy arrays
+
 def process_video(file_path, frame_interval, dev_mode):
     # Start timer for debugging
     start_time = time.time()
-    
-    # Load video
-    cap = cv2.VideoCapture(file_path)
 
     # Get video width and height
-    video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    frame_count = 0
+    video_width, video_height, total_frames, video_duration, video_recorded_time = get_video_metadata(file_path)
 
     # Define multiple Regions of Interest (ROIs) as fractions of the video dimensions
     screen_x = 1179
@@ -112,39 +189,10 @@ def process_video(file_path, frame_interval, dev_mode):
     my_team = Team()
     opponent_team = Team()
 
-    # Dev mode storage:
-    if dev_mode:
-        frames = []  # Store original frames
-        roi_images = []  # Store processed ROIs for overlay
-        ocr_results = []  # Store OCR results
-
-    # Process frames at specific intervals without reading the full video
-    while frame_count < total_frames:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)  # Jump to the desired frame
-        ret, frame = cap.read()
-        if not ret:
-            break  # Stop if video ends
-
-        # print(f"Processing frame {frame_count}")  # Debugging
-
-        # Prepare the display for dev mode
-        if dev_mode:
-            frames.append(frame.copy())  # Store the original frame
-
-        roi_processed = []
-        frame_ocr_results = []
-
-        for roi in ROIs:
-            x = int(roi[0] * video_width)
-            y = int(roi[1] * video_height)
-            w = int(roi[2] * video_width)
-            h = int(roi[3] * video_height)
-
-            roi_frame = frame[y:y+h, x:x+w]  # Extract only the ROI
-            processed_roi = roi_frame
-            # processed_roi = preprocess_roi(roi_frame)  # Apply OCR preprocessing
-            best_word = image_to_word_long(processed_roi)  # Perform OCR
-            # best_word = "Bob"
+    for roi in ROIs:
+        cropped_video =  crop_video_to_memory(file_path, roi, video_width, video_height, frame_interval=30)
+        for frame in cropped_video:
+            best_word = image_to_word_long(frame)
 
             if best_word:
                 if roi[4] == "Opponent":
@@ -155,20 +203,7 @@ def process_video(file_path, frame_interval, dev_mode):
                     if not my_team.has_pokemon(best_word):
                         new_pokemon = Pokemon(best_word)
                         my_team.add_pokemon(new_pokemon)
-
-            if dev_mode:
-                roi_processed.append((processed_roi, (x, y, w, h)))  # Store processed ROI with its position
-                frame_ocr_results.append((best_word, (x, y, w, h)))  # Store OCR results with position
-
-        if dev_mode:
-            roi_images.append(roi_processed)  # Store processed ROIs per frame
-            ocr_results.append(frame_ocr_results)  # Store OCR predictions per frame
-
-        # Move to the next frame interval
-        frame_count += frame_interval
-
-    cap.release()  # Release video since we've stored all frames
-
+    
     print("My Team: ")
     my_team.print_team()
     print("Opponent Team: ")
@@ -177,10 +212,6 @@ def process_video(file_path, frame_interval, dev_mode):
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"\n🚀 Execution Time: {execution_time:.2f} seconds")
-
-    if dev_mode:
-        init_dev_mode(frames, roi_images, ocr_results)
-
 
 def main():
     file_path = "src/video.mp4";
