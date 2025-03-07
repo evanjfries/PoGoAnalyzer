@@ -7,6 +7,7 @@ import numpy as np
 import time
 import subprocess
 import multiprocessing
+import os
 
 start_time =0
 
@@ -129,6 +130,20 @@ def get_video_metadata(video_path):
         print(f"❌ Error running ffprobe: {e}")
         return "Unknown", "Unknown", "Unknown", "Unknown", "Unknown"
 
+def euclidean_distance(frame1, frame2):
+    """Computes the Euclidean distance between two frames."""
+    return np.linalg.norm(frame1.astype(np.float32) - frame2.astype(np.float32))
+
+def save_npy(file, file_name, dir_name):
+    os.makedirs(dir_name, exist_ok=True)
+    npy_path = os.path.join(dir_name, f"{file_name}.png")
+    np.save(npy_path, file)
+
+def save_img(file, file_name, dir_name):
+    os.makedirs(dir_name, exist_ok=True)
+    img_path = os.path.join(dir_name, f"{file_name}.png")
+    cv2.imwrite(img_path, file)
+
 def crop_video_to_memory(input_video, roi, video_width, video_height, frame_interval=30):
     """Uses FFmpeg to crop a video, convert to grayscale, and store every 30th frame in memory."""
     x = int(roi[0] * video_width)
@@ -136,13 +151,18 @@ def crop_video_to_memory(input_video, roi, video_width, video_height, frame_inte
     w = int(roi[2] * video_width)
     h = int(roi[3] * video_height)
 
+    reference_frame_path = "pokemon_example.npy"
+    if os.path.exists(reference_frame_path):
+        reference_frame = np.load(reference_frame_path)
+        reference_frame = cv2.resize(reference_frame, (w, h))  # Ensure same dimensions
+
     ffmpeg_cmd = [
         "ffmpeg",
-        "-i", input_video,             # Input file
-        "-vf", f"crop={w}:{h}:{x}:{y}", # Crop filter
-        "-f", "rawvideo",               # Output as raw frames
-        "-pix_fmt", "gray",             # Convert to grayscale to save space
-        "-"                             # Output to stdout (pipe)
+        "-i", input_video,
+        "-vf", f"fps=2,crop={w}:{h}:{x}:{y},format=gray",  # Reduce FPS before processing
+        "-f", "rawvideo",
+        "-pix_fmt", "gray",
+        "-"
     ]
 
     # Run FFmpeg and capture raw frame data
@@ -151,25 +171,49 @@ def crop_video_to_memory(input_video, roi, video_width, video_height, frame_inte
     frame_size = w * h  # 1 byte per pixel (Grayscale)
     frames = []
     frame_count = 0
-
+    saved_count = 0
+    prev_frame = None
 
     while True:
         raw_frame = process.stdout.read(frame_size)  # Read frame from stdout
         if not raw_frame:
             break  # Stop when no more frames are available
 
-        frame_count += 1
-        if frame_count % frame_interval != 0:
-            continue  # Skip frames that are not every 30th frame
+        # frame_count += 1
+        # if frame_count % frame_interval != 0:
+        #     continue  # Skip frames that are not every 30th frame
 
         frame = np.frombuffer(raw_frame, np.uint8).reshape((h, w))  # Convert raw data to NumPy array
-        frames.append(frame)  # Store frame in memory
+
+        distance = euclidean_distance(frame, reference_frame)
+        # print(f"📏 Frame {saved_count:04d} - Euclidean Distance: {distance:.2f}")
+
+        if distance < 5000:
+            if(prev_frame is not None):
+                distance_from_prev = euclidean_distance(frame, prev_frame)
+                if distance_from_prev < 1000: # If too similar (same Pokemon as last save)
+                    continue  
+            frames.append(frame)
+            prev_frame = frame
+            
+            # save_npy(frame, f"frame_{saved_count:04d}", "src/npy")
+            
+            # save_img(frame, f"{roi[4]}-{saved_count}-{distance_from_prev:.0f}", "src/saved_images")
+        # else:
+            # save_img(frame, f"{distance}", "src/bad_images")
+            
+        saved_count += 1
 
     process.stdout.close()
     process.wait()
 
-    print(f"✅ Stored {len(frames)} cropped grayscale frames in memory.")
-    return frames  # Returns frames as NumPy arrays
+    print(f"✅ {roi[4]} → Stored {len(frames)} cropped grayscale frames in memory.")
+    return frames, roi[4]  # Returns frames as NumPy arrays
+
+def process_frame_ocr(frame, roi_label):
+    """Performs OCR on a single frame and updates the team accordingly."""
+    best_word = image_to_word_long(frame)
+    return (roi_label, best_word) if best_word else None
 
 def process_video(file_path, frame_interval, dev_mode):
     # Start timer for debugging
@@ -182,28 +226,36 @@ def process_video(file_path, frame_interval, dev_mode):
     screen_x = 1179
     screen_y = 2556
     ROIs = [
-        ((30/screen_x), (170/screen_y), (280/screen_x), (40/screen_y), "Self"),  # My Pokemon
-        ((860/screen_x), (170/screen_y), (280/screen_x), (40/screen_y), "Opponent"),  # Opponent Pokemon
+        ((30/screen_x), (170/screen_y), (280/screen_x), (40/screen_y), "My Team"),  # My Pokemon
+        ((860/screen_x), (170/screen_y), (280/screen_x), (40/screen_y), "Opponent Team"),  # Opponent Pokemon
     ]
 
-    my_team = Team()
-    opponent_team = Team()
+    my_team = Team("My Team")
+    opponent_team = Team("Opponent Team")
 
-    for roi in ROIs:
-        cropped_video =  crop_video_to_memory(file_path, roi, video_width, video_height, frame_interval=30)
-        for frame in cropped_video:
-            best_word = image_to_word_long(frame)
+    results = []
+    with multiprocessing.Pool(processes=len(ROIs)) as pool:
+        # ✅ Crop all ROIs in parallel
+        cropped_results = pool.starmap(
+            crop_video_to_memory,
+            [(file_path, roi, video_width, video_height, 30) for roi in ROIs]
+        )
 
-            if best_word:
-                if roi[4] == "Opponent":
-                    if not opponent_team.has_pokemon(best_word):
-                        new_pokemon = Pokemon(best_word)
-                        opponent_team.add_pokemon(new_pokemon)
-                elif roi[4] == "Self":
-                    if not my_team.has_pokemon(best_word):
-                        new_pokemon = Pokemon(best_word)
-                        my_team.add_pokemon(new_pokemon)
+        # ✅ OCR in parallel after cropping completes
+        with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as ocr_pool:
+            results.extend(ocr_pool.starmap(
+                process_frame_ocr,
+                [(frame, roi_label) for frames, roi_label in cropped_results for frame in frames]
+            ))
     
+    for result in results:
+        if result:
+            roi_label, best_word = result
+            if roi_label == "Opponent Team" and not opponent_team.has_pokemon(best_word):
+                opponent_team.add_pokemon(Pokemon(best_word))
+            elif roi_label == "My Team" and not my_team.has_pokemon(best_word):
+                my_team.add_pokemon(Pokemon(best_word))
+
     print("My Team: ")
     my_team.print_team()
     print("Opponent Team: ")
@@ -214,7 +266,7 @@ def process_video(file_path, frame_interval, dev_mode):
     print(f"\n🚀 Execution Time: {execution_time:.2f} seconds")
 
 def main():
-    file_path = "src/video.mp4";
+    file_path = "src/hour.mp4";
     frame_interval = 30;
     dev_mode = False;
     process_video(file_path, frame_interval, dev_mode)
