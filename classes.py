@@ -31,4 +31,18 @@ class Team:
         members = []
         for pokemon in self.pokemon:
             members.append(pokemon.get_name())
-        print(members)
+        print(f"\033[1m{self.type}:\033[0m {members}")
+    
+class Battle:
+    def __init__(self, my_team, opponent_team, result):
+        self.my_team = my_team
+        self.opponent_team = opponent_team
+        self.result = result
+
+    def print_battle(self):
+        self.my_team.print_team()
+        self.opponent_team.print_team()
+        print(f"\033[1mResult:\033[0m {self.result}")
+
+    def is_win(self):
+        return True if self.result == "Win" else False

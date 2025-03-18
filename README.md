@@ -6,11 +6,12 @@ python3 textDetector.py
 
 ## Execution Time
 
-textDetectorFast:
+Pokemon Names:
 20 second: 2.90 seconds
 10 minutes: 65.51 seconds
 1 hour 7 minutes: 403.12 seconds
 
-textDetector:
-20 second: 12.17 seconds
-10 minutes: 370.74 seconds
+Pokemon Names & Outcomes:
+20 second:
+10 minutes: 83.18 seconds
+1 hour 7 minutes:
