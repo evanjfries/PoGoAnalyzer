@@ -200,6 +200,12 @@ def crop_video_to_memory(input_video, roi, video_width, video_height):
         reference_frame_path = "src/references/OpponentTeam.npy"
         max_distance_from_reference = 3000
         min_distance_from_previous = 1000
+    elif roi[4] == "Win":
+        reference_frame_path = "src/references/Win.npy"
+        max_distance_from_reference = 10000
+    elif roi[4] == "Loss":
+        reference_frame_path = "src/references/Loss.npy"
+        max_distance_from_reference = 10000
 
     if os.path.exists(reference_frame_path):
         reference_frame_npy = np.load(reference_frame_path)
@@ -218,15 +224,13 @@ def crop_video_to_memory(input_video, roi, video_width, video_height):
     process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
     
     frame_size = w * h 
-    pokemon = []
+    labels = []
     frame_number = 0
     prev_frame = None
-    battle_breaks = []
 
     while True:
         raw_frame = process.stdout.read(frame_size)  # Read frame from stdout
         if not raw_frame:
-            battle_breaks.append((prev_frame[1], frame_number)) # Add the last frame with a pokemon
             break  # Stop when no more frames are available
 
         frame_npy = np.frombuffer(raw_frame, np.uint8).reshape((h, w)) # Convert raw data to NumPy array
@@ -237,32 +241,29 @@ def crop_video_to_memory(input_video, roi, video_width, video_height):
         if distance < max_distance_from_reference: # Continue if it contains the data we need
 
             # save_npy(frame[0], f"{frame_number}-{distance:.0f}", f"src/{roi[4]}-npy")
+            if roi[4] == "Win" or roi[4] == "Loss":
+                if labels:
+                    if frame_number-labels[-1][1] < 30:
+                        continue
 
-            if prev_frame is not None: # If we are not on the first frame
+                label = roi[4]
+                labels.append((label, frame_number))
+            else:
+                if prev_frame is not None: # If we are not on the first frame
+                    # Discard if too similar to last frame (repeat data)
+                    distance_from_prev = euclidean_distance(frame[0], prev_frame[0])
+                    # save_img(frame[0], f"{frame_number}-{distance:.0f}-{distance_from_prev:.0f}", f"src/{roi[4]}-images")
+                    
+                    if distance_from_prev < min_distance_from_previous:
+                        frame_number+=1
+                        prev_frame = frame
+                        continue  
 
-                # Discard if too similar to last frame (repeat data)
-                distance_from_prev = euclidean_distance(frame[0], prev_frame[0])
-                # save_img(frame[0], f"{frame_number}-{distance:.0f}-{distance_from_prev:.0f}", f"src/{roi[4]}-images")
-                
-                if distance_from_prev < min_distance_from_previous:
-                    frame_number+=1
+                label = process_frame_ocr(frame[0])
+                if word_in_file(label,"src/references/pokemon.txt") and label is not None:
+                    # print(f"{label}")
                     prev_frame = frame
-                    continue  
-
-                # Add as a frame of interest if last frame was over 50 ago
-                time_since_last_pokemon = frame[1] - prev_frame[1]
-                if time_since_last_pokemon > 30:
-                    battle_breaks.append((prev_frame[1], frame[1]))
-
-            else: # We are on the first battle frame; add it as a frame of interest
-                battle_breaks.append((0, frame_number))
-
-            prev_frame = frame
-            label = process_frame_ocr(frame[0])
-            if word_in_file(label,"src/references/pokemon.txt") and label is not None:
-                # print(f"{label}")
-                prev_frame = frame
-                pokemon.append((label, frame_number))
+                    labels.append((label, frame_number))
             # save_npy(frame, f"frame_{saved_count:04d}", "src/npy")
 
         frame_number += 1
@@ -270,8 +271,8 @@ def crop_video_to_memory(input_video, roi, video_width, video_height):
     process.stdout.close()
     process.wait()
 
-    print(f"✅ {roi[4]} → Stored {len(pokemon)} cropped grayscale frames in memory.")
-    return roi[4], pokemon, battle_breaks  # Returns frames as NumPy arrays
+    print(f"✅ {roi[4]} → Processed {len(labels)} cropped grayscale frames.")
+    return roi[4], labels  # Returns frames as NumPy arrays
 
 def process_frame_ocr(frame):
     label = image_to_word_long(frame)
@@ -288,82 +289,60 @@ def process_video(file_path, frame_interval, dev_mode):
     # print(f"{video_duration}")
     # print(f"{fps}")
 
-    # Define multiple Regions of Interest (text_ROIs) as fractions of the video dimensions
+    # Define multiple Regions of Interest (ROIs) as fractions of the video dimensions
     screen_x = 1179
     screen_y = 2556
-    text_ROIs = [
+    ROIs = [
         ((30/screen_x), (170/screen_y), (280/screen_x), (40/screen_y), "My Team"),  # My Pokemon
         ((860/screen_x), (170/screen_y), (280/screen_x), (40/screen_y), "Opponent Team"),  # Opponent Pokemon
-    ]
-
-    image_ROIs = [
         ((180/screen_x), (1215/screen_y), (805/screen_x), (135/screen_y), "Win"),  # Win
         ((330/screen_x), (1110/screen_y), (515/screen_x), (135/screen_y), "Loss"),  # Loss
     ]
 
     pokemon_results = []
     battle_results = []
+
     # Step 1: Crop all text ROIs
-    with multiprocessing.Pool(processes=len(text_ROIs)) as pool:
-        pokemon_results = pool.starmap(
+    with multiprocessing.Pool(processes=len(ROIs)) as pool:
+        results = pool.starmap(
             crop_video_to_memory,
-            [(file_path, roi, video_width, video_height) for roi in text_ROIs]
+            [(file_path, roi, video_width, video_height) for roi in ROIs]
         )
 
-    # Step 2: Determine battle outcomes
-    battle_breaks = [battle_break for _, _, battle_break in pokemon_results]
-    print(f"Battle Breaks (My Team): {battle_breaks[0]}")
-    print(f"\nBattle Breaks (Opponent Team): {battle_breaks[1]}")
-    merged_battle_breaks = merge_battle_breaks(battle_breaks[0], battle_breaks[1])
-    print(f"\nMerged Battle Breaks: {merged_battle_breaks}")
-    with multiprocessing.Pool(processes=len(image_ROIs)) as battle_pool:
-        battle_results = battle_pool.starmap(
-            determine_match_outcomes,
-            [(file_path, roi, video_width, video_height, merged_battle_breaks) for roi in image_ROIs]
-        )
-
-    results_array = []    
-    for result in battle_results:
-        if result:
-            roi_label, results = result
-            # print(f"{roi_label} : {results}")
-            for result in results:
-                results_array.append((roi_label, result))
-    
-    results_array.sort(key=lambda x: x[1])
-    # Sort pokemon_results by frame_number just in case
-    # pokemon_results = [r for r in pokemon_results if r is not None]
-    # Now safe to sort
-    # pokemon_results.sort(key=lambda r: r[2])
     battles = []
-    for result in pokemon_results:
-        if result[0] == "Opponent Team":
-            opponent_team = result
-        elif result[0] == "My Team":
-            my_team = result
+    battle_results = []
+    for result in results:
+        if result[0] == "Win" or result[0] == "Loss":
+            roi_label, labels = result
+            # print(f"{roi_label} : {results}")
+            for label in labels:
+                battle_results.append((label[0], label[1]))
+    
+    battle_results.sort(key=lambda x: x[1])
 
     # For each battle range
-    for i, (battle_result_label, battle_end_frame) in enumerate(results_array):
+    for i, (battle_result_label, battle_end_frame) in enumerate(battle_results):
         # Determine start frame for this battle
-        battle_start_frame = 0 if i == 0 else results_array[i-1][1] + 1
+        battle_start_frame = 0 if i == 0 else battle_results[i-1][1] + 1
 
         my_team = Team("My Team")
         opponent_team = Team("Opponent Team")
 
         # Filter Pokémon results within this battle's frame range
-        for result in pokemon_results:
+        for result in results:
             # print(result)
-            roi_label, labels, battle_breaks = result  # Unpack the single tuple
+            if result[0] in ["Opponent Team", "My Team"]:
 
-            for label in labels:  # Now loop through the Pokémon list
-                pokemon = label[0]
-                frame_number = label[1]
+                roi_label, labels = result  # Unpack the single tuple
 
-                if battle_start_frame <= frame_number <= battle_end_frame:
-                    if roi_label == "Opponent Team" and not opponent_team.has_pokemon(pokemon):
-                        opponent_team.add_pokemon(Pokemon(pokemon))
-                    elif roi_label == "My Team" and not my_team.has_pokemon(pokemon):
-                        my_team.add_pokemon(Pokemon(pokemon))
+                for label in labels:  # Now loop through the Pokémon list
+                    pokemon = label[0]
+                    frame_number = label[1]
+                    if battle_start_frame <= frame_number <= battle_end_frame:
+                        if roi_label == "Opponent Team" and not opponent_team.has_pokemon(pokemon):
+                            opponent_team.add_pokemon(Pokemon(pokemon))
+                        elif roi_label == "My Team" and not my_team.has_pokemon(pokemon):
+                            my_team.add_pokemon(Pokemon(pokemon))
 
         battle = Battle(my_team, opponent_team, battle_result_label)
         battles.append(battle)
