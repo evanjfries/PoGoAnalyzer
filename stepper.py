@@ -39,4 +39,4 @@ def step_through_video(video_path, step=30):
     cv2.destroyAllWindows()
 
 # Example usage
-step_through_video("src/10min.mp4", step=30)
+step_through_video("src/hour.mp4", step=30)

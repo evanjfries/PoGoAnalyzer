@@ -13,5 +13,5 @@ Pokemon Names:
 
 Pokemon Names & Outcomes:
 20 second:
-10 minutes: 83.18 seconds
-1 hour 7 minutes:
+10 minutes: 66.56 seconds
+1 hour 7 minutes: 403.01 seconds

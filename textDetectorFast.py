@@ -12,57 +12,25 @@ import datetime
 
 start_time =0
 
-def init_dev_mode(frames, roi_images, ocr_results):
-    # Step through images manually
-    current_index = 0
-    total_frames = len(frames)
-
-    while True:
-        # Get current original frame and processed text_ROIs
-        original_frame = frames[current_index]
-        roi_overlays = roi_images[current_index]
-        ocr_predictions = ocr_results[current_index]
-
-        # Overlay processed text_ROIs on the original frame
-        overlay_frame = original_frame.copy()
-
-        for (processed_roi, (x, y, w, h)), (ocr_word, _) in zip(roi_overlays, ocr_predictions):
-            # Convert processed ROI to 3-channel for visualization
-            roi_bgr = cv2.cvtColor(processed_roi, cv2.COLOR_GRAY2BGR)
-            roi_resized = cv2.resize(roi_bgr, (w, h))  # Resize back to original ROI size
-            overlay_frame[y:y+h, x:x+w] = roi_resized  # Place processed ROI back onto the image
-
-            # Draw detected word slightly above the bounding box
-            if ocr_word:
-                text_position = (x, y - 10)  # Slightly above the box
-                cv2.putText(overlay_frame, ocr_word, text_position,
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-        # Display the frame with overlaid processed text_ROIs and text predictions
-        cv2.imshow("OCR Frame Viewer (Left/Right to navigate)", overlay_frame)
-
-        # Wait for user input
-        key = cv2.waitKey(0)  # Wait indefinitely for a key press
-
-        if key == 27:  # ESC key to exit
-            break
-        elif key == ord("a") or key == 81:  # Left arrow key ('a' for alternative)
-            current_index = max(0, current_index - 1)  # Go back to the previous processed frame
-        elif key == ord("d") or key == 83:  # Right arrow key ('d' for alternative)
-            current_index = min(total_frames - 1, current_index + 1)  # Go forward to the next processed frame
-
-    cv2.destroyAllWindows()  # Close all windows after exiting
-
-def image_to_word_short(processed_roi):
-        # Perform OCR using image_to_string (faster than image_to_data)
-        best_word = pytesseract.image_to_string(processed_roi, config="--psm 6").strip()
-        return best_word
+def merge_battle_breaks(team1, team2):
+    # Combine both lists and sort by start time
+    combined = sorted(team1 + team2)
+    
+    # Merge overlapping and adjacent intervals
+    merged = []
+    for start, end in combined:
+        if merged and merged[-1][1] >= start - 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    
+    return merged
 
 def image_to_word_long(processed_roi):
     # Perform OCR on the processed ROI
     ocr_data = pytesseract.image_to_data(processed_roi, output_type=Output.DICT)
 
-    best_word = ""
+    label = ""
     highest_confidence = 0
     confidence_threshold = 40
 
@@ -72,10 +40,10 @@ def image_to_word_long(processed_roi):
         confidence = int(ocr_data["conf"][i])  # Confidence score (0-100)
 
         if word and confidence > confidence_threshold and confidence > highest_confidence:
-            best_word = word
+            label = word
             highest_confidence = confidence
 
-    return best_word
+    return label
 
 def preprocess_roi(roi):
     """Apply preprocessing techniques to suppress background noise while keeping text clear"""
@@ -158,6 +126,10 @@ def calculate_roi(roi, video_width, video_height):
     h = int(roi[3] * video_height)
     return x,y,w,h
 
+def word_in_file(word, file_path):
+    with open(file_path, "r", encoding="utf-8") as file:
+        return word in (line.strip() for line in file)
+
 def determine_match_outcomes(input_video, roi, video_width, video_height, frame_ranges):
     x,y,w,h = calculate_roi(roi, video_width, video_height)
 
@@ -168,7 +140,7 @@ def determine_match_outcomes(input_video, roi, video_width, video_height, frame_
     elif roi[4] == "Loss":
         start_frame_offset = 7
         reference_frame_path = "src/references/Loss.npy"
-    max_distance_from_reference = 5000
+    max_distance_from_reference = 10000
     
     reference_frame = None
     if os.path.exists(reference_frame_path):
@@ -246,7 +218,7 @@ def crop_video_to_memory(input_video, roi, video_width, video_height):
     process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
     
     frame_size = w * h 
-    frames = []
+    pokemon = []
     frame_number = 0
     prev_frame = None
     battle_breaks = []
@@ -285,8 +257,12 @@ def crop_video_to_memory(input_video, roi, video_width, video_height):
             else: # We are on the first battle frame; add it as a frame of interest
                 battle_breaks.append((0, frame_number))
 
-            frames.append(frame)
             prev_frame = frame
+            label = process_frame_ocr(frame[0])
+            if word_in_file(label,"src/references/pokemon.txt") and label is not None:
+                # print(f"{label}")
+                prev_frame = frame
+                pokemon.append((label, frame_number))
             # save_npy(frame, f"frame_{saved_count:04d}", "src/npy")
 
         frame_number += 1
@@ -294,12 +270,12 @@ def crop_video_to_memory(input_video, roi, video_width, video_height):
     process.stdout.close()
     process.wait()
 
-    print(f"✅ {roi[4]} → Stored {len(frames)} cropped grayscale frames in memory.")
-    return frames, roi[4], battle_breaks  # Returns frames as NumPy arrays
+    print(f"✅ {roi[4]} → Stored {len(pokemon)} cropped grayscale frames in memory.")
+    return roi[4], pokemon, battle_breaks  # Returns frames as NumPy arrays
 
-def process_frame_ocr(frame, roi_label):
-    best_word = image_to_word_long(frame[0])
-    return (roi_label, best_word, frame[1]) if best_word else None
+def process_frame_ocr(frame):
+    label = image_to_word_long(frame)
+    return label if label else None
 
 def process_video(file_path, frame_interval, dev_mode):
     # Start timer for debugging
@@ -329,26 +305,21 @@ def process_video(file_path, frame_interval, dev_mode):
     battle_results = []
     # Step 1: Crop all text ROIs
     with multiprocessing.Pool(processes=len(text_ROIs)) as pool:
-        cropped_results = pool.starmap(
+        pokemon_results = pool.starmap(
             crop_video_to_memory,
             [(file_path, roi, video_width, video_height) for roi in text_ROIs]
         )
 
-    # Step 2: OCR frames
-    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as ocr_pool:
-        pokemon_results.extend(ocr_pool.starmap(
-            process_frame_ocr,
-            [(frame, roi_label) for frames, roi_label, _ in cropped_results for frame in frames]
-        ))
-
-    # Step 3: Determine battle outcomes
-    battle_breaks = [battle_break for _, _, battle_break in cropped_results]
-    # print(f"Battle Breaks (My Team): {battle_breaks[0]}")
-    # print(f"Battle Breaks (Opponent Team): {battle_breaks[1]}")
+    # Step 2: Determine battle outcomes
+    battle_breaks = [battle_break for _, _, battle_break in pokemon_results]
+    print(f"Battle Breaks (My Team): {battle_breaks[0]}")
+    print(f"\nBattle Breaks (Opponent Team): {battle_breaks[1]}")
+    merged_battle_breaks = merge_battle_breaks(battle_breaks[0], battle_breaks[1])
+    print(f"\nMerged Battle Breaks: {merged_battle_breaks}")
     with multiprocessing.Pool(processes=len(image_ROIs)) as battle_pool:
         battle_results = battle_pool.starmap(
             determine_match_outcomes,
-            [(file_path, roi, video_width, video_height, battle_breaks[0]) for roi in image_ROIs]
+            [(file_path, roi, video_width, video_height, merged_battle_breaks) for roi in image_ROIs]
         )
 
     results_array = []    
@@ -361,10 +332,15 @@ def process_video(file_path, frame_interval, dev_mode):
     
     results_array.sort(key=lambda x: x[1])
     # Sort pokemon_results by frame_number just in case
-    pokemon_results = [r for r in pokemon_results if r is not None]
+    # pokemon_results = [r for r in pokemon_results if r is not None]
     # Now safe to sort
-    pokemon_results.sort(key=lambda r: r[2])
+    # pokemon_results.sort(key=lambda r: r[2])
     battles = []
+    for result in pokemon_results:
+        if result[0] == "Opponent Team":
+            opponent_team = result
+        elif result[0] == "My Team":
+            my_team = result
 
     # For each battle range
     for i, (battle_result_label, battle_end_frame) in enumerate(results_array):
@@ -375,12 +351,19 @@ def process_video(file_path, frame_interval, dev_mode):
         opponent_team = Team("Opponent Team")
 
         # Filter Pokémon results within this battle's frame range
-        for roi_label, best_word, frame_number in pokemon_results:
-            if battle_start_frame <= frame_number <= battle_end_frame:
-                if roi_label == "Opponent Team" and not opponent_team.has_pokemon(best_word):
-                    opponent_team.add_pokemon(Pokemon(best_word))
-                elif roi_label == "My Team" and not my_team.has_pokemon(best_word):
-                    my_team.add_pokemon(Pokemon(best_word))
+        for result in pokemon_results:
+            # print(result)
+            roi_label, labels, battle_breaks = result  # Unpack the single tuple
+
+            for label in labels:  # Now loop through the Pokémon list
+                pokemon = label[0]
+                frame_number = label[1]
+
+                if battle_start_frame <= frame_number <= battle_end_frame:
+                    if roi_label == "Opponent Team" and not opponent_team.has_pokemon(pokemon):
+                        opponent_team.add_pokemon(Pokemon(pokemon))
+                    elif roi_label == "My Team" and not my_team.has_pokemon(pokemon):
+                        my_team.add_pokemon(Pokemon(pokemon))
 
         battle = Battle(my_team, opponent_team, battle_result_label)
         battles.append(battle)
@@ -401,7 +384,7 @@ def process_video(file_path, frame_interval, dev_mode):
     print(f"\n🚀 Execution Time: {execution_time:.2f} seconds")
 
 def main():
-    file_path = "src/10min.mp4";
+    file_path = "src/hour.mp4";
     frame_interval = 30;
     dev_mode = False;
     process_video(file_path, frame_interval, dev_mode)
