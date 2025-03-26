@@ -135,10 +135,10 @@ def determine_match_outcomes(input_video, roi, video_width, video_height, frame_
 
     start_frame_offset=0
     if roi[4] == "Win":
-        start_frame_offset = 15 # Saves extra time, as the match result never appears within 15 frames battle end
+        # start_frame_offset = 15 # Saves extra time, as the match result never appears within 15 frames battle end
         reference_frame_path = "src/references/Win.npy"
     elif roi[4] == "Loss":
-        start_frame_offset = 7
+        # start_frame_offset = 7
         reference_frame_path = "src/references/Loss.npy"
     max_distance_from_reference = 10000
     
@@ -244,20 +244,20 @@ def crop_video_to_memory(input_video, roi, video_width, video_height):
                 distance_from_prev = euclidean_distance(frame[0], prev_frame[0])
                 # save_img(frame[0], f"{frame_number}-{distance:.0f}-{distance_from_prev:.0f}", f"src/{roi[4]}-images")
                 
+                # Add as a frame of interest if last frame was over 30 ago
+                time_since_last_pokemon = frame[1] - prev_frame[1]
+                if time_since_last_pokemon > 30:
+                    battle_breaks.append((prev_frame[1], frame[1]))
+
+                # If too close to previous --> same pokemon as before
                 if distance_from_prev < min_distance_from_previous:
                     frame_number+=1
                     prev_frame = frame
                     continue  
 
-                # Add as a frame of interest if last frame was over 50 ago
-                time_since_last_pokemon = frame[1] - prev_frame[1]
-                if time_since_last_pokemon > 30:
-                    battle_breaks.append((prev_frame[1], frame[1]))
-
             else: # We are on the first battle frame; add it as a frame of interest
                 battle_breaks.append((0, frame_number))
 
-            prev_frame = frame
             label = process_frame_ocr(frame[0])
             if word_in_file(label,"src/references/pokemon.txt") and label is not None:
                 # print(f"{label}")
@@ -312,10 +312,11 @@ def process_video(file_path, frame_interval, dev_mode):
 
     # Step 2: Determine battle outcomes
     battle_breaks = [battle_break for _, _, battle_break in pokemon_results]
-    print(f"Battle Breaks (My Team): {battle_breaks[0]}")
-    print(f"\nBattle Breaks (Opponent Team): {battle_breaks[1]}")
     merged_battle_breaks = merge_battle_breaks(battle_breaks[0], battle_breaks[1])
-    print(f"\nMerged Battle Breaks: {merged_battle_breaks}")
+
+    # print(f"Battle Breaks (My Team): {battle_breaks[0]}")
+    # print(f"\nBattle Breaks (Opponent Team): {battle_breaks[1]}")
+    # print(f"\nMerged Battle Breaks: {merged_battle_breaks}")
     with multiprocessing.Pool(processes=len(image_ROIs)) as battle_pool:
         battle_results = battle_pool.starmap(
             determine_match_outcomes,
